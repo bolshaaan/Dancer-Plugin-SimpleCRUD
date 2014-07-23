@@ -249,20 +249,6 @@ A hashref of field_name => message to show when Javascript validation fails.
 Default message is "- Invalid entry for the "$fieldname" field".  See above for
 example.
 
-=item C<sort_options> (optional)
-
-A hashref of field_name => optionspec indicating how select options should be sorted
-
-This is currently a passthrough to L<CGI::FormBuilder>'s L<sortopts|CGI::FormBuilder/sortopts>.  There are several
-built-in values:
-
-    NAME            Sort option values by name
-    NUM             Sort option values numerically
-    LABELNAME       Sort option labels by name
-    LABELNUM        Sort option labels numerically
-
-See the documentation for L<CGI::FormBuilder/sortopts> for more.
-
 =item C<acceptable_values> (optional)
 
 A hashref of arrayrefs to declare that certain fields can take only a set of
@@ -426,7 +412,9 @@ sub simple_crud {
     my (%args) = @_;
 
     # Get a database connection to verify that the table name is OK, etc.
-    my $dbh = database($args{db_connection_name});
+    my $dbh = $args{dbh} || database($args{db_connection_name});
+
+
 
     if (!$dbh) {
         warn "No database handle";
@@ -504,7 +492,7 @@ sub simple_crud {
         get _construct_url(
             $args{dancer_prefix}, $args{prefix}, "/delete/:id"
             ) => sub {
-            return _apply_template(<<CONFIRMDELETE, $args{'template'});
+            return _apply_template(<<CONFIRMDELETE, $args{'template'}, $args{'tokens'});
 <p>
 Do you really wish to delete this record?
 </p>
@@ -523,10 +511,10 @@ CONFIRMDELETE
         );
         my $delete_handler = sub {
             my ($id) = params->{record_id} || splat;
-            my $dbh = database($args{db_connection_name});
+            my $dbh =  $args{dbh} ||   database($args{db_connection_name});
             $dbh->quick_delete($table_name, { $key_column => $id })
                 or return _apply_template("<p>Failed to delete!</p>",
-                $args{'template'});
+                $args{'template'}, $args{'tokens'});
 
             redirect _external_url($args{dancer_prefix}, $args{prefix});
         };
@@ -549,7 +537,7 @@ sub _create_add_edit_route {
     my $params = params;
     my $id     = $params->{id};
 
-    my $dbh = database($args->{db_connection_name});
+    my $dbh = $args->{dbh} ||   database($args->{db_connection_name});
 
     # a hash containing the current values in the database
     my $values_from_database;
@@ -646,6 +634,7 @@ sub _create_add_edit_route {
 
     my $form = CGI::FormBuilder->new(
         fields   => \@editable_columns,
+    	name 	 => "new_values",
         params   => $paramsobj,
         values   => $values_from_database,
         validate => $validation,
@@ -685,11 +674,10 @@ sub _create_add_edit_route {
         # Certain options in $args simply cause that value to be added to the
         # params for this field we'll pass to $form->field:
         my %option_map = (
-            labels        => 'label',
-            validation    => 'validate',
-            message       => 'message',
-            jsmessage     => 'jsmessage',
-            sort_options  => 'sortopts',
+            labels     => 'label',
+            validation => 'validate',
+            message    => 'message',
+            jsmessage  => 'jsmessage',
         );
         while (my ($arg_name, $field_param_name) = each(%option_map)) {
             if (my $val = $args->{$arg_name}{$field}) {
@@ -713,6 +701,8 @@ sub _create_add_edit_route {
         if (my $override_type = $args->{input_types}{$field}) {
             $field_params{type} = $override_type;
         }
+
+
 
         # if the constraint on this is an array of arrays,
         # and there are three elements in the first array in that list,
@@ -748,6 +738,7 @@ sub _create_add_edit_route {
             table_name => $table_name,
             key_column => $key_column,
         };
+		
         # Fire a hook so the user can manipulate the data in a whole range of
         # cunning ways, if they wish
         execute_hook('add_edit_row', \%params);
@@ -755,22 +746,33 @@ sub _create_add_edit_route {
 
         my $verb;
         my $success;
-        if (exists params('route')->{id}) {
 
-            # We're editing an existing record
-            $success = $dbh->quick_update($table_name,
-                { $key_column => params('route')->{id} }, \%params);
-            $verb = 'update';
-        } else {
-            $success = $dbh->quick_insert($table_name, \%params);
-            # pass them *this* dbh instance so that they can call last_insert_id()
-            # against it if they need to.  last_insert_id in some instances requires
-            # catalog, schema, etc args, so we can't just call it and save the result.
-            # important that we don't do any more database operations that would change
-            # last_insert_id between here and the hook, or this won'w work.
-            $meta_for_hook->{dbh} = $dbh;
-            $verb = 'create new';
-        }
+        eval {
+        	if (exists params('route')->{id}) {
+
+            	# We're editing an existing record
+            	$success = $dbh->quick_update($table_name,
+                	{ $key_column => params('route')->{id} }, \%params);
+            	$verb = 'update';
+        	} else {
+            	$success = $dbh->quick_insert($table_name, \%params);
+            	# pass them *this* dbh instance so that they can call last_insert_id()
+            	# against it if they need to.  last_insert_id in some instances requires
+            	# catalog, schema, etc args, so we can't just call it and save the result.
+            	# important that we don't do any more database operations that would change
+            	# last_insert_id between here and the hook, or this won'w work.
+            	$meta_for_hook->{dbh} = $dbh;
+            	$verb = 'create new';
+        	}
+    	};
+
+		if ($@) {
+            return _apply_template(
+				"Извините, произошла ошибка, связанная с SQL, Проверьте, пожалуйста, поля:" .
+            	"<p>SQL error: $@</p>",
+                $args->{'template'}, $args->{'tokens'});
+		}
+
 
         $meta_for_hook->{success} = $success;
         $meta_for_hook->{verb} = $verb;
@@ -794,18 +796,18 @@ sub _create_add_edit_route {
             #);
             return _apply_template(
                 "<p>Unable to $verb $args->{record_title}</p>",
-                $args->{'template'});
+                $args->{'template'}, $args->{'tokens'});
         }
 
     } else {
-        return _apply_template($form->render, $args->{'template'});
+        return _apply_template($form->render, $args->{'template'}, $args->{'tokens'} );
     }
 }
 
 sub _create_list_handler {
     my ($args, $table_name, $key_column) = @_;
 
-    my $dbh = database($args->{db_connection_name});
+    my $dbh = $args->{dbh} || database($args->{db_connection_name});
     my $columns = _find_columns($dbh, $table_name);
 
     my $display_columns = $args->{'display_columns'};
@@ -841,16 +843,21 @@ sub _create_list_handler {
     my $order_by_param     = params->{'o'} || "";
     my $order_by_direction = params->{'d'} || "";
     my $html               = <<"SEARCHFORM";
- <p><form name="searchform" method="get">
-     Field:  <select name="searchfield">$options</select> &nbsp;&nbsp;
-     <select name="searchtype">
+ <p>
+ 	<form role="form" class="form-inline" name="searchform" method="get">
+
+ 	<div class="form-group">
+     Field:  <select name="searchfield" class="form-control">$options</select> &nbsp;&nbsp;
+     <select class="form-control" name="searchtype">
      <option value="c">Contains</option><option value="e">Equals</option>
      </select>&nbsp;&nbsp;
-     <input name="q" id="searchquery" type="text" size="30"/> &nbsp;&nbsp;
+     <input class="form-control" name="q" id="searchquery" type="text" size="50"/> &nbsp;&nbsp;
      <input name="o" type="hidden" value="$order_by_param"/>
      <input name="d" type="hidden" value="$order_by_direction"/>
-     <input name="searchsubmit" type="submit" value="Search"/>
- </form></p>
+     <input class="btn btn-default" name="searchsubmit" type="submit" value="Search"/>
+ 	</div>
+ </form>
+ </p>
 SEARCHFORM
 
     if ($args->{query_auto_focus}) {
@@ -913,9 +920,7 @@ SEARCHFORM
 
     my $col_list = join(
         ',',
-        map({ $table_name . "." . $dbh->quote_identifier($_) . " AS " .
-                  $dbh->quote_identifier($args->{labels}{$_} || $_)
-            }
+        map({ $table_name . "." . $dbh->quote_identifier($_) }
             @select_cols),
         @foreign_cols,    # already assembled from quoted identifiers
         @custom_cols,
@@ -1007,7 +1012,6 @@ SEARCHFORM
         # Invalid column name ? discard it
         my $valid = grep { $_->{COLUMN_NAME} eq $order_by_column } @$columns;
         $order_by_column = $key_column unless $valid;
-        my $order_by_table = $table_name;
 
         my $order_by_direction
             = (exists params->{'d'} && params->{'d'} eq "desc")
@@ -1018,7 +1022,6 @@ SEARCHFORM
 
         %columns_sort_options = map {
             my $col_name       = $_->{COLUMN_NAME};
-            my $col = $args->{labels}{$col_name} || $col_name;
             my $direction      = $order_by_direction;
             my $direction_char = "";
             if ($col_name eq $order_by_column) {
@@ -1027,19 +1030,14 @@ SEARCHFORM
             }
             my $url = _external_url($args->{dancer_prefix}, $args->{prefix})
                 . "?o=$col_name&d=$direction&q=$q&searchfield=$sf";
-            $col =>
-                "<a href=\"$url\">$col&nbsp;$direction_char</a>";
+            $col_name =>
+                "<a href=\"$url\">$col_name&nbsp;$direction_char</a>";
         } @$columns;
 
-        if (exists $args->{foreign_keys} and exists $args->{foreign_keys}{$order_by_column}) {
-                my $fk = $args->{foreign_keys}{$order_by_column};
-                $order_by_column = $fk->{label_column};
-                $order_by_table = $fk->{table};
-        }
-
-        $query .= " ORDER BY "
-            . $dbh->quote_identifier($order_by_table) . "." . $dbh->quote_identifier($order_by_column)
-            . " $order_by_direction ";
+        $query
+            .= " ORDER BY $table_name."
+            . $dbh->quote_identifier($order_by_column) . " "
+            . $order_by_direction . " ";
     }
 
     if ($args->{paginate} && $args->{paginate} =~ /^\d+$/) {
@@ -1101,6 +1099,7 @@ SEARCHFORM
             transform=> ($args->{custom_columns}->{$column_alias}->{transform} or sub { return shift;}),
         };
     }
+
     my $table = HTML::Table::FromDatabase->new(
         -sth       => $sth,
         -border    => 1,
@@ -1139,7 +1138,7 @@ SEARCHFORM
         -html                => 'escape',
     );
 
-    $html .= $table->getTable || '';
+    $html .= q(<div id="main_table">) . ($table->getTable || '') . q(</div>);
 
     if ($args->{editable} && _has_permission('edit', $args)) {
         $html .= sprintf '<a href="%s">Add a new %s</a></p>',
@@ -1168,16 +1167,17 @@ function delrec(record_id) {
 DELETEJS
     }
 
-    return _apply_template($html, $args->{'template'});
+    return _apply_template($html, $args->{'template'}, $args->{'tokens'});
 }
 
 sub _apply_template {
-    my ($html, $template) = @_;
+    my ($html, $template, $tokens) = @_;
+    $tokens ||= {};
 
     if ($template) {
-        return template $template, { simple_crud => $html };
+        return template $template, { simple_crud => $html, %$tokens  };
     } else {
-        return engine('template')->apply_layout($html);
+        return engine('template')->apply_layout($html, $tokens  );
     }
 }
 
@@ -1300,7 +1300,7 @@ sub _external_url {
         return _construct_url(@_);
     }
     else {
-        return uri_for(_construct_url(@_));
+ 		return uri_for(_construct_url(@_));
     }
 }
 
